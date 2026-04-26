@@ -1,0 +1,12 @@
+# 虚拟环境
+venv/
+env/
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 测试生成的临时图片或数据
+*.jpg
+*.png
+logs/
