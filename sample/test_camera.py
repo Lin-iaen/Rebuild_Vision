@@ -12,7 +12,7 @@ def test_camera_capture():
     # 👑 你的环境专属黄金参数 (填入你窃听到的数据)
     # 我们把参数提出来作为变量，既传给硬件，也写进水印
     SHUTTER = 33239
-    GAIN = 8.0
+    GAIN = 3.0
 
     # 清理旧测试数据
     for f in [output_file, watermark_file]:
