@@ -13,7 +13,7 @@ Python 3, OpenCV, no formal build system or test framework.
 python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 
-# Run the main loop (currently a stub)
+# Run the main loop
 python3 main.py
 ```
 
@@ -21,29 +21,72 @@ No linter, formatter, or type checker is configured. There is no CI.
 
 ## Architecture
 
-Four-layer pipeline described in `README.md`. Current state of implementation:
+Modular design with clear separation of concerns. Main entry point is `main.py` with a state machine:
 
-| Layer | File | Status |
-|-------|------|--------|
-| Sensor (camera) | `camera.py` | Implemented |
-| Vision pipeline | `tracker.py` | Implemented |
-| Tracking logic | `main.py` | Stub (`import cv2` only) |
-| Actuator (UART) | `uart.py` | Implemented |
-| Web debug stream | `web_stream.py` | Implemented |
+```
+INIT → 矩形检测 → CALIBRATE(可选) → READY → RESET / TRACK
+```
 
-### camera.py
+### Core Modules
+
+| Module | File | Status | Purpose |
+|--------|------|--------|---------|
+| Sensor | `camera.py` | Implemented | rpicam-vid 摄像头采集封装 |
+| Vision | `tracker.py` | Implemented | LAB 色彩空间激光检测 |
+| Stream | `web_stream.py` | Implemented | 通用 MJPEG 推流服务 |
+| Serial | `uart.py` | Implemented | 通用串口通信模块 |
+| Gimbal | `gimbal.py` | Implemented | 云台控制 + M⁻¹ 矩阵变换 |
+| Rectangle | `rectangle.py` | Implemented | 矩形检测 + 子目标生成 |
+| Calibration | `calibration.py` | Implemented | 云台坐标系标定 |
+| Control | `control.py` | Implemented | 循迹控制逻辑 |
+| Main | `main.py` | Implemented | 状态机 + 菜单 + Web监控 |
+
+### Module Details
+
+#### camera.py
 `rpicam-vid` 子进程封装，提供线程安全的 `Camera` 类。硬件参数锁死：shutter=33239, gain=8.0, awb=auto, 640×480, 30fps。
 
-### tracker.py
+#### tracker.py
 核心检测代码。使用 **LAB 色彩空间**（不是 HSV）进行激光点检测。提供两个函数：
 - `process_laser_detection(frame)` — 激光点检测，返回 (x, y) 坐标
 - `process_init_mode(frame)` — 四边形标定点检测
 
-### web_stream.py
+#### web_stream.py
 通用 MJPEG 推流服务 `MjpegStream`。零耦合设计，接受回调函数 `frame_provider() -> bytes`，由调用方决定推什么画面。
 
-### uart.py
-UART 通信模块。旧协议：`0xAA 0x55 <dx_i16> <dy_i16> <checksum> 0x0A`（大端）。新云台协议：`0x02 0x01/0x02 <value_i16>`（单轴指令，值 = 角度 × 100）。
+#### uart.py
+通用串口通信模块。提供 `UartController` 类，`send_raw(data)` 方法发送原始字节。不耦合任何协议格式。
+
+#### gimbal.py
+云台控制模块。封装新云台协议，通过 M⁻¹ 矩阵将像素误差转换为角度指令。
+- 协议：`0x02 0x01/0x02 <angle_i16>`（X/Y轴，值 = 角度 × 100）
+- `GimbalController.move(delta_px, delta_py)` — 像素误差 → 角度指令
+
+#### rectangle.py
+矩形检测与管理模块。检测黑色电工胶带矩形框，生成循迹子目标点。
+- `RectangleManager.detect(frame)` — 检测矩形
+- `get_targets()` — 生成顺时针子目标点列表
+- 角点顺序：[左上, 右上, 右下, 左下]
+
+#### calibration.py
+云台坐标系标定模块。通过发送已知角度指令，记录激光轨迹，反解出 2×2 变换矩阵。
+- `Calibrator.run()` — 执行标定，返回 M⁻¹ 矩阵
+- `load_calibration()` / `save_calibration()` — 文件读写
+- 标定结果保存到 `calibration.json`
+
+#### control.py
+循迹控制模块。实现连续反馈循环：检测激光 → 计算误差 → M⁻¹ 变换 → 发送指令。
+- `LaserTracker.reset_to_center()` — 复位到矩形中心
+- `track_rectangle()` — 绕矩形循迹一圈
+- 控制频率：20fps（50ms 延时）
+
+#### main.py
+主入口。状态机架构，集成所有模块：
+- 矩形检测
+- 标定（可选，可跳过）
+- 复位到中心
+- 绕矩形循迹
+- Web 监控（浏览器实时查看）
 
 ## Testing
 
@@ -73,14 +116,14 @@ From `README.md` and `tracker.py`:
 
 ## Communication Protocols
 
-### 旧协议（uart.py — send_error）
-`0xAA 0x55 <dx_i16> <dy_i16> <checksum> 0x0A`（大端，值 = 像素误差 × 10）
-
-### 新云台协议（test_align.py）
+### 新云台协议（gimbal.py）
 单轴指令，4 字节帧：
 - X轴：`0x02 0x01 <value_h> <value_l>`
 - Y轴：`0x02 0x02 <value_h> <value_l>`
 - 数据：有符号 int16 大端，值 = 角度 × 100
+
+### 标定结果（calibration.json）
+M⁻¹ 矩阵保存为 JSON 格式，用于像素误差到角度指令的转换。
 
 ## Conventions
 
@@ -88,3 +131,5 @@ From `README.md` and `tracker.py`:
 - `requirements.txt` lists runtime deps: opencv-python-headless, numpy, Flask, pyserial. No dev dependencies exist.
 - `.gitignore` excludes `*.jpg`, `*.png`, and `sample/align.txt`.
 - The `venv/` directory is gitignored but present on disk.
+- Video frame text uses English (OpenCV doesn't support Chinese in putText).
+- Terminal output uses Chinese.
