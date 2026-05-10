@@ -10,3 +10,6 @@ __pycache__/
 *.jpg
 *.png
 logs/
+
+# 标定结果记录
+sample/align.txt
