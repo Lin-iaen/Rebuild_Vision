@@ -43,18 +43,29 @@ def process_laser_detection(
     
     # 使用vision_project的原始固定阈值（已验证有效）
     # 根据实际测试数据优化：
-    # 激光点中心: L=250, A=131
-    # 激光点周围: L=101, A=132
-    # 降低A阈值从130到125，确保稳定检测
-    l_center_thresh = 180
+    # 激光点中心: L=250-254, A=127-132
+    # 边缘色差伪影: L=228, A=143-157
+    # 添加 A 值上界，排除色差伪影
+    # l_center_thresh = 180
+    l_center_thresh = 230
     l_halo_thresh = 60
-    a_thresh_center = 125  # 从130降低到125
-    a_thresh_halo = 130    # 从135降低到130
+    a_thresh_center = 125      # A 值下界，检测红色激光
+    a_thresh_center_max = 150  # A 值上界，排除色差伪影
+    a_thresh_halo = 130        # 光晕 A 值下界
+    a_thresh_halo_max = 145    # 光晕 A 值上界
     
-    center_mask = (l_ch > l_center_thresh) & (a_ch > a_thresh_center)
-    halo_mask = (l_ch > l_halo_thresh) & (a_ch > a_thresh_halo)
+    center_mask = (l_ch > l_center_thresh) & (a_ch > a_thresh_center) & (a_ch < a_thresh_center_max)
+    halo_mask = (l_ch > l_halo_thresh) & (a_ch > a_thresh_halo) & (a_ch < a_thresh_halo_max)
     mask = center_mask | halo_mask
     mask_u8 = (mask.astype(np.uint8)) * 255
+
+    # ====== ROI 排除边缘区域 ======
+    # 排除画面边缘 10%，避免边缘干扰（如左下角误检）
+    margin_x = int(w * 0.1)
+    margin_y = int(h * 0.1)
+    roi_mask = np.zeros((h, w), dtype=np.uint8)
+    roi_mask[margin_y:h-margin_y, margin_x:w-margin_x] = 255
+    mask_u8 = cv2.bitwise_and(mask_u8, roi_mask)
 
     # ====== 形态学操作 ======
     # 先闭后开：修复光斑内部断裂，再去除小孤立噪声

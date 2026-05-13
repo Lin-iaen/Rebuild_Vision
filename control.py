@@ -87,11 +87,16 @@ class LaserTracker:
     def move_to_target(self, target: tuple[float, float]) -> bool:
         """移动激光到目标位置，连续反馈循环。
 
+        使用简单噪声剔除：距离上次位置超过阈值则判定为噪声。
+        检测失败时发送零指令（云台不移动）。
         返回: 是否成功到达
         """
         with self._lock:
             self._current_target = target
             self._status_text = f"Move to ({target[0]:.0f}, {target[1]:.0f})"
+
+        last_valid_pos = None
+        NOISE_THRESHOLD = 50.0  # 像素，超过此距离判定为噪声
 
         while self._running:
             frame = self._cam.read()
@@ -99,25 +104,41 @@ class LaserTracker:
                 continue
 
             pos, _ = process_laser_detection(frame)
-            if pos is None:
-                continue
 
-            with self._lock:
-                self._current_pos = pos
+            if pos is not None:
+                # 检测成功
+                if last_valid_pos is None:
+                    # 首次检测，直接接受
+                    last_valid_pos = pos
+                    filtered_pos = pos
+                elif np.linalg.norm(np.array(pos) - np.array(last_valid_pos)) > NOISE_THRESHOLD:
+                    # 异常值（噪声），丢弃，不发送指令
+                    continue
+                else:
+                    # 正常检测
+                    last_valid_pos = pos
+                    filtered_pos = pos
 
-            error = np.array(target) - np.array(pos)
-            dist = np.linalg.norm(error)
-
-            if dist < self._threshold:
                 with self._lock:
-                    self._path_history.append(pos)
-                    self._current_pos = None
-                    self._current_target = None
-                    self._status_text = f"Reached ({target[0]:.0f}, {target[1]:.0f})"
-                return True
+                    self._current_pos = filtered_pos
 
-            self._gimbal.move(error[0], error[1])
-            time.sleep(0.05)  # 50ms 延时 (20fps) 若是33ms,则是30fps,接近摄像头输出帧率极限
+                error = np.array(target) - np.array(filtered_pos)
+                dist = np.linalg.norm(error)
+
+                if dist < self._threshold:
+                    with self._lock:
+                        self._path_history.append(filtered_pos)
+                        self._current_pos = None
+                        self._current_target = None
+                        self._status_text = f"Reached ({target[0]:.0f}, {target[1]:.0f})"
+                    return True
+
+                self._gimbal.move(error[0], error[1])
+            else:
+                # 检测失败，发送零指令（云台不移动）
+                self._gimbal.move(0, 0)
+
+            time.sleep(0.05)  # 50ms 延时 (20fps)
 
         return False
 

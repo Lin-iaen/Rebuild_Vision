@@ -29,8 +29,8 @@ RPICAM_CMD = [
     "--codec", "mjpeg",
     "-o", "-",
     "--nopreview",
-    "--shutter", "33239",
-    "--gain", "8.0",
+    "--shutter", "25000",
+    "--gain", "4.0",
     "--awb", "auto",
     "--vflip", "--hflip",
 ]
@@ -70,9 +70,9 @@ def process_frame(frame_bgr: np.ndarray) -> bytes | None:
     roi_l_mean = np.mean(roi_l)
     roi_a_mean = np.mean(roi_a)
     
-    # 应用当前阈值
-    center_mask = (l_ch > 180) & (a_ch > 130)
-    halo_mask = (l_ch > 60) & (a_ch > 135)
+    # 应用当前阈值（与 tracker.py 保持一致）
+    center_mask = (l_ch > 180) & (a_ch > 125)
+    halo_mask = (l_ch > 60) & (a_ch > 130)
     mask = center_mask | halo_mask
     mask_u8 = (mask.astype(np.uint8)) * 255
     
@@ -83,9 +83,9 @@ def process_frame(frame_bgr: np.ndarray) -> bytes | None:
     annotated = frame_bgr.copy()
     cv2.circle(annotated, (l_max_x, l_max_y), 10, (0, 0, 255), 2)
     cv2.putText(annotated, f"L={l_ch[l_max_y, l_max_x]}", (l_max_x+15, l_max_y-15), 
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
     cv2.putText(annotated, f"A={a_ch[l_max_y, l_max_x]}", (l_max_x+15, l_max_y), 
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
     
     # 添加统计信息
     info_lines = [
@@ -93,19 +93,19 @@ def process_frame(frame_bgr: np.ndarray) -> bytes | None:
         f"A_mean={a_mean:.0f}, A_max={a_max}",
         f"ROI_L={roi_l_mean:.0f}, ROI_A={roi_a_mean:.0f}",
         f"Mask pixels={mask_pixels}",
-        f"Thresholds: L>180 & A>130, L>60 & A>135",
+        f"Thresholds: L>180 & A>125, L>60 & A>130",
     ]
     
     y_offset = 30
     for line in info_lines:
         cv2.putText(annotated, line, (10, y_offset), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
         y_offset += 25
     
     # 拼接原图和mask
     mask_bgr = cv2.cvtColor(mask_u8, cv2.COLOR_GRAY2BGR)
-    cv2.putText(mask_bgr, "MASK (L>60 & A>135)", (10, 30), 
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+    cv2.putText(mask_bgr, "MASK (L>60 & A>130)", (10, 30), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
     
     combined = np.hstack((annotated, mask_bgr))
     
