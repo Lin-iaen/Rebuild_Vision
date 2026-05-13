@@ -21,7 +21,7 @@ No linter, formatter, or type checker is configured. There is no CI.
 
 ## Architecture
 
-Modular design with clear separation of concerns. Main entry point is `main.py` with a state machine:
+Main entry point is `main.py` with a state machine:
 
 ```
 INIT → 矩形检测 → CALIBRATE(可选) → READY → RESET / TRACK
