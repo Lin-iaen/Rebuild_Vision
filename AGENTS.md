@@ -51,6 +51,12 @@ INIT → 矩形检测 → CALIBRATE(可选) → READY → RESET / TRACK
 - `process_laser_detection(frame)` — 激光点检测，返回 (x, y) 坐标
 - `process_init_mode(frame)` — 四边形标定点检测
 
+**检测参数**：
+- L 通道阈值：L_center=180, L_halo=60
+- A 通道阈值：125 < A < 140（中心），130 < A < 145（光晕）
+- A 值上界作用：排除边缘色差伪影（A=143-157）
+- ROI 掩膜：排除画面边缘 10%
+
 #### web_stream.py
 通用 MJPEG 推流服务 `MjpegStream`。零耦合设计，接受回调函数 `frame_provider() -> bytes`，由调用方决定推什么画面。
 
@@ -79,6 +85,8 @@ INIT → 矩形检测 → CALIBRATE(可选) → READY → RESET / TRACK
 - `LaserTracker.reset_to_center()` — 复位到矩形中心
 - `track_rectangle()` — 绕矩形循迹一圈
 - 控制频率：20fps（50ms 延时）
+- 噪声剔除：距离上次位置超过 50px 则判定为噪声，丢弃
+- 检测失败：发送零指令，云台保持静止
 
 #### main.py
 主入口。状态机架构，集成所有模块：
