@@ -11,8 +11,6 @@ import math
 import cv2
 import numpy as np
 
-from tracker import _order_quad_points
-
 logger = logging.getLogger(__name__)
 
 # 检测参数
@@ -26,6 +24,18 @@ PAIR_RATIO_MAX = 4.0     # 内外面积比上限
 # 子目标点密度（可修改）
 EDGE_POINTS_LONG = 10    # 长边子目标数
 EDGE_POINTS_SHORT = 5    # 短边子目标数
+
+
+def _order_quad_points(pts: np.ndarray) -> np.ndarray:
+    """将四边形点排序为 [左上, 右上, 右下, 左下]。"""
+    rect = np.zeros((4, 2), dtype=np.float32)
+    s = pts.sum(axis=1)
+    diff = np.diff(pts, axis=1)
+    rect[0] = pts[np.argmin(s)]
+    rect[2] = pts[np.argmax(s)]
+    rect[1] = pts[np.argmin(diff)]
+    rect[3] = pts[np.argmax(diff)]
+    return rect
 
 
 class RectangleManager:

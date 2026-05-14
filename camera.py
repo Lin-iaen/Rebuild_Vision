@@ -53,9 +53,9 @@ class Camera:
         self,
         width: int = 640,
         height: int = 480,
-        framerate: int = 30,
-        shutter: int = 30000,
-        gain: float = 4.0,
+        framerate: int = 10,
+        shutter: int = 33000,
+        gain: float = 3.0,
         awb: str = "auto",
     ) -> None:
         self._width = width

@@ -53,15 +53,10 @@ INIT → 矩形检测 → CALIBRATE(可选) → READY → RESET / TRACK
 `rpicam-vid` 子进程封装，提供线程安全的 `Camera` 类。硬件参数锁死：shutter=33239, gain=8.0, awb=auto, 640×480, 30fps。
 
 #### tracker.py
-核心检测代码。使用 **LAB 色彩空间**（不是 HSV）进行激光点检测。提供两个函数：
-- `process_laser_detection(frame)` — 激光点检测，返回 (x, y) 坐标
-- `process_init_mode(frame)` — 四边形标定点检测
-
-**检测参数**：
-- L 通道阈值：L_center=230, L_halo=60
-- A 通道阈值：125 < A < 150（中心），130 < A < 145（光晕）
-- A 值上界作用：排除边缘色差伪影（A=143-157）
-- ROI 掩膜：排除画面边缘 10%
+核心检测代码。使用 **LAB 色彩空间**（不是 HSV）进行激光点检测。参数外置，通过 `LaserParams` dataclass 配置：
+- `process_laser_detection(frame, params=None, debug=False)` — 激光点检测，返回 (x, y) 坐标
+- 默认参数见 `LaserParams` 字段；传入自定义 `LaserParams` 可动态调参
+- 调试调参使用 `sample/test_laser_tuner.py`（Web 滑块实时调整）
 
 #### web_stream.py
 通用 MJPEG 推流服务 `MjpegStream`。零耦合设计，接受回调函数 `frame_provider() -> bytes`，由调用方决定推什么画面。
@@ -69,11 +64,13 @@ INIT → 矩形检测 → CALIBRATE(可选) → READY → RESET / TRACK
 #### uart.py
 通用串口通信模块。提供 `UartController` 类，`send_raw(data)` 方法发送原始字节。不耦合任何协议格式。
 
-#### gimbal.py
-云台控制模块。封装新云台协议，通过 M⁻¹ 矩阵将像素误差转换为角度指令。
-- 协议：`0x02 0x01/0x02 <angle_i16>`（X/Y轴，值 = 角度 × 100）
-- `GimbalController.move(delta_px, delta_py)` — 像素误差 → 角度指令
-- **注意:** `DEFAULT_M_INV` (单位矩阵) 在 `gimbal.py:24` 和 `main.py:32` 各定义了一份，修改时需要同步。
+#### motor.py
+云台 CAN 电机驱动。提供速度/位置两种控制接口：
+- `set_speed(az_dps, pt_dps)` — CAN ID 0x0682 速度模式，值/100 = °/s
+- `set_position(az_deg, pt_deg)` — CAN ID 0x0173 位置模式，值/100 = °
+- `stop()` — 零速度急停
+- 帧结构见下方 Communication Protocols
+- M⁻¹ 矩阵由 `control.py` 持有，`motor.py` 不耦合像素误差
 
 #### rectangle.py
 矩形检测与管理模块。检测黑色电工胶带矩形框，生成循迹子目标点。
@@ -112,18 +109,15 @@ All test scripts use `MjpegStream` for browser-based visualization. OpenCV GUI c
 | Script | Purpose | Usage |
 |--------|---------|-------|
 | `test_camera_stream.py` | 摄像头采集验证 | `python3 sample/test_camera_stream.py` |
-| `test_tracker_stream.py` | 激光追踪推流验证 | `python3 sample/test_tracker_stream.py` |
+| `test_laser_tuner.py` | 激光检测 Web 调参 | `python3 sample/test_laser_tuner.py` |
 | `test_rectangle.py` | 黑色胶带矩形标定 | `python3 sample/test_rectangle.py` |
 | `test_align.py` | 云台坐标系标定 | `python3 sample/test_align.py` |
 | `test_camera.py` | 单帧拍照水印测试 | `python3 sample/test_camera.py` |
-| `test_gain.py` | 增益参数调试 | `python3 sample/test_gain.py` |
-| `test_lab_diagnostic.py` | LAB 值诊断 | `python3 sample/test_lab_diagnostic.py` |
-| `test_optimized_lab.py` | 优化 LAB 算法测试 | `python3 sample/test_optimized_lab.py` |
 | `test_can.py` | CAN 帧协议测试 | `python3 sample/test_can.py` |
 | `test_uart.py` | 串口环回测试 | `python3 sample/test_uart.py` |
-| `test_lab_vs_hsv.py` | LAB vs HSV 对比测试 | `python3 sample/test_lab_vs_hsv.py` |
+| `main_test.py` | 开环循迹验证 | `python3 sample/main_test.py` |
 
-`sample/test_laser.py` is an empty file (stale). `sample/test_stream.py` is a shorter duplicate of `test_camera_stream.py`.
+`sample/test_stream.py` is a shorter duplicate of `test_camera_stream.py`.
 
 ## Key Hardware Constants (do not change without re-measurement)
 
@@ -135,17 +129,17 @@ From `README.md` and `tracker.py`:
 
 ## Communication Protocols
 
-### 新云台协议（gimbal.py）
-
-Serial 模式 — 单轴指令，4 字节帧：
-- X轴：`0x02 0x01 <value_h> <value_l>`
-- Y轴：`0x02 0x02 <value_h> <value_l>`
-- 数据：有符号 int16 大端，值 = 角度 × 100
+### 新云台协议（motor.py）
 
 CAN 模式 — 双轴打包，10 字节帧：
 - 帧结构：`[0x06 0x82] [0x00 0x00 0x00 0x00] [X_i16] [Y_i16]`
 - X/Y 数据：有符号 int16 大端，值 = 角度 × 100
-- 通过 `GimbalController(uart, mode='can')` 切换
+- 通过 `MotorController.set_speed()` 发送
+
+CAN 模式 — 位置控制，10 字节帧：
+- 帧结构：`[0x01 0x73] [az_i16] [pt_i16] [0x00 0x00 0x00 0x00]`
+- 数据：有符号 int16 大端，值 = 角度 × 100，范围 0-36000
+- 通过 `MotorController.set_position()` 发送
 
 ### 标定结果（calibration.json）
 M⁻¹ 矩阵保存为 JSON 格式，用于像素误差到角度指令的转换。
