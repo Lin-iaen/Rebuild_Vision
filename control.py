@@ -14,7 +14,7 @@ import cv2
 import numpy as np
 
 from camera import Camera
-from gimbal import GimbalController
+from motor import MotorController
 from rectangle import RectangleManager
 from tracker import process_laser_detection
 
@@ -28,19 +28,22 @@ class LaserTracker:
     """激光循迹控制器。
 
     通过摄像头反馈实现闭环控制，将激光移动到目标位置。
+    M⁻¹ 矩阵由调用方传入，在 move_to_target 中完成像素→角度变换。
     """
 
     def __init__(
         self,
         cam: Camera,
-        gimbal: GimbalController,
+        motor: MotorController,
         rect_mgr: RectangleManager,
+        M_inv: np.ndarray | None = None,
         threshold: float = DEFAULT_THRESHOLD,
     ) -> None:
         self._cam = cam
-        self._gimbal = gimbal
+        self._motor = motor
         self._rect = rect_mgr
         self._threshold = threshold
+        self._M_inv = M_inv if M_inv is not None else np.eye(2)
 
         # 状态（供 Web 监控读取）
         self._current_pos: tuple[float, float] | None = None
@@ -88,7 +91,7 @@ class LaserTracker:
         """移动激光到目标位置，连续反馈循环。
 
         使用简单噪声剔除：距离上次位置超过阈值则判定为噪声。
-        检测失败时发送零指令（云台不移动）。
+        检测失败时发送零速度（云台不移动）。
         返回: 是否成功到达
         """
         with self._lock:
@@ -97,6 +100,8 @@ class LaserTracker:
 
         last_valid_pos = None
         NOISE_THRESHOLD = 50.0  # 像素，超过此距离判定为噪声
+        KP = 0.5                # 比例增益: °/s 每像素
+        COAST_FACTOR = 0.25     # 丢失后保留的比例，沿目标方向微速前进
 
         while self._running:
             frame = self._cam.read()
@@ -108,14 +113,11 @@ class LaserTracker:
             if pos is not None:
                 # 检测成功
                 if last_valid_pos is None:
-                    # 首次检测，直接接受
                     last_valid_pos = pos
                     filtered_pos = pos
                 elif np.linalg.norm(np.array(pos) - np.array(last_valid_pos)) > NOISE_THRESHOLD:
-                    # 异常值（噪声），丢弃，不发送指令
                     continue
                 else:
-                    # 正常检测
                     last_valid_pos = pos
                     filtered_pos = pos
 
@@ -133,10 +135,20 @@ class LaserTracker:
                         self._status_text = f"Reached ({target[0]:.0f}, {target[1]:.0f})"
                     return True
 
-                self._gimbal.move(error[0], error[1])
+                # 像素误差 → M⁻¹ → 角度 → 速度指令
+                angles = self._M_inv @ error
+                self._motor.set_speed(float(angles[0]) * KP, float(angles[1]) * KP)
             else:
-                # 检测失败，发送零指令（云台不移动）
-                self._gimbal.move(0, 0)
+                # 检测失败，沿最后已知位置指向目标的方向微速前进
+                if last_valid_pos is not None:
+                    error = np.array(target) - np.array(last_valid_pos)
+                    angles = self._M_inv @ error
+                    self._motor.set_speed(
+                        float(angles[0]) * KP * COAST_FACTOR,
+                        float(angles[1]) * KP * COAST_FACTOR,
+                    )
+                else:
+                    self._motor.stop()
 
             time.sleep(0.05)  # 50ms 延时 (20fps)
 

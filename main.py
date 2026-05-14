@@ -17,17 +17,17 @@ import numpy as np
 from calibration import Calibrator, load_calibration, save_calibration
 from camera import Camera
 from control import LaserTracker
-from gimbal import GimbalController
+from motor import MotorController
 from rectangle import RectangleManager
 from uart import UartController
 from web_stream import MjpegStream
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)    
 
 # ===== 默认配置 =====
-SERIAL_PORT = "/dev/ttyAMA0"
-SERIAL_BAUD = 115200
+CAN_PORT = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5972089810-if00"
+CAN_BAUD = 4000000
 CALIB_FILE = "calibration.json"
 DEFAULT_M_INV = np.array([[1.0, 0.0], [0.0, 1.0]])
 
@@ -81,7 +81,7 @@ def main() -> None:
 
     # ===== 初始化 =====
     print("=" * 50)
-    print("IBVS 极简视觉追踪系统")
+    print("IBVS 追踪系统")
     print("=" * 50)
 
     subprocess.run(["pkill", "-f", "flask"], check=False)
@@ -102,12 +102,17 @@ def main() -> None:
         return
 
     # 立即启动 Web 推流
-    stream = MjpegStream(frame_provider=_frame_provider, title="IBVS 追踪系统")
+    stream = MjpegStream(frame_provider=_frame_provider, title="IBVS 追踪")
     stream.start()
     print(f"Web 监控: http://0.0.0.0:5000")
 
     # 串口
-    uart = UartController(port=SERIAL_PORT, baudrate=SERIAL_BAUD)
+    uart = UartController(port=CAN_PORT, baudrate=CAN_BAUD,
+                          dtr=False, rts=False, open_delay=0.5)
+    print(f"串口 (CAN): {CAN_PORT} @ {CAN_BAUD}")
+
+    # 电机
+    motor = MotorController(uart)
 
     # 矩形管理器
     _rect_mgr = RectangleManager()
@@ -171,7 +176,7 @@ def main() -> None:
 
     if choice == "2":
         # 执行标定
-        _calibrator = Calibrator(cam=_cam, uart=uart)
+        _calibrator = Calibrator(cam=_cam, motor=motor)
         print("标定中... 浏览器可查看实时轨迹")
         print("请确保激光点打在屏幕上")
 
@@ -186,8 +191,7 @@ def main() -> None:
             print("标定失败，使用已有数据或默认值")
 
     # ===== 初始化控制模块 =====
-    gimbal = GimbalController(uart=uart, M_inv=M_inv)
-    _tracker = LaserTracker(cam=_cam, gimbal=gimbal, rect_mgr=_rect_mgr)
+    _tracker = LaserTracker(cam=_cam, motor=motor, rect_mgr=_rect_mgr, M_inv=M_inv)
 
     # ===== 主菜单 =====
     print()

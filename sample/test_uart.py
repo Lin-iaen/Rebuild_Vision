@@ -6,7 +6,8 @@ print("警告：请确保 main.py 已经关闭！")
 
 try:
     # 打开串口
-    ser = serial.Serial('/dev/ttyAMA0', 115200, timeout=1)
+    # ser = serial.Serial('/dev/ttyAMA0', 115200, timeout=1)
+    ser = serial.Serial('/dev/serial/by-id/usb-1a86_USB_Single_Serial_5972089810-if00', 4000000, timeout=1)
     print("✅ 串口打开成功！")
     
     # 清空可能残留的旧数据

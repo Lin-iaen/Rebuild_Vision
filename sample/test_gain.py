@@ -17,7 +17,7 @@ RPICAM_CMD = [
     "rpicam-vid", "-t", "0",
     "--width", "640", "--height", "480", "--framerate", "30",
     "--codec", "mjpeg", "-o", "-", "--nopreview",
-    "--shutter", "10000",  # 从极限的 33239 降到了 20000
+    "--shutter", "20000",  # 从极限的 33239 降到了 20000
     "--gain", "4.0",       # 从暴力的 8.0 降到了 4.0
     "--awb", "auto",
     "--vflip", "--hflip",
