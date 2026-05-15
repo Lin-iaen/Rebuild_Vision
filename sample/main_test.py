@@ -183,11 +183,29 @@ def detect_laser_single(cam: Camera) -> tuple[float, float] | None:
     return pos
 
 
+def project_to_edge(
+    pos: tuple[float, float],
+    P_start: tuple[float, float],
+    P_end: tuple[float, float],
+) -> tuple[float, float]:
+    """计算激光点到线段上的最近点（垂足）。"""
+    ab = np.array(P_end) - np.array(P_start)
+    ap = np.array(pos) - np.array(P_start)
+    denom = float(np.dot(ab, ab))
+    if denom < 1e-9:
+        return P_start
+    t = np.dot(ap, ab) / denom
+    t = max(0.0, min(1.0, t))
+    result = np.array(P_start) + t * ab
+    return (float(result[0]), float(result[1]))
+
+
 def execute_move_with_correction(
     motor: MotorController,
     cam: Camera,
     move_params: tuple[float, float, float],
-    target: tuple[float, float],
+    P_start: tuple[float, float],
+    P_end: tuple[float, float],
     M_inv: np.ndarray,
     check_interval: float = 0.1,
     correction_gain: float = 0.2,
@@ -195,16 +213,19 @@ def execute_move_with_correction(
     """开环移动 + 视觉矫正叠加。
 
     每 check_interval 秒检测激光位置：
-    - 检测成功 → 激光漂离矩形边框 → 叠加矫正速度推回
+    - 检测成功 → 计算到当前边的垂足 → 垂直推回边框
     - 检测失败 → 激光在黑色边框上 → 无需矫正
+    - 距终点 < 15px → 提前退出
     """
     az_speed, pt_speed, duration = move_params
     t_start = time.time()
     next_check = t_start + check_interval
+    MIN_ERROR = 15.0
+    ARRIVE_EARLY = 15.0
 
     print(
         f"  az={az_speed:+.2f}°/s  pt={pt_speed:+.2f}°/s  t={duration:.2f}s"
-        f"  (visual correction ON, KP={correction_gain})"
+        f"  (edge-correct, KP={correction_gain})"
     )
 
     while time.time() - t_start < duration:
@@ -215,10 +236,23 @@ def execute_move_with_correction(
             next_check = time.time() + check_interval
             pos = detect_laser_single(cam)
             if pos is not None:
-                error = np.array(target) - np.array(pos)
-                angles = M_inv @ error
-                current_az += float(angles[0]) * correction_gain
-                current_pt += float(angles[1]) * correction_gain
+                # 距终点 < 15px → 提前退出
+                dist_to_end = np.linalg.norm(
+                    np.array(P_end) - np.array(pos)
+                )
+                if dist_to_end < ARRIVE_EARLY:
+                    motor.stop()
+                    return
+
+                # 矫正方向 = 边上最近点 - 当前 (垂直推回)
+                closest = project_to_edge(pos, P_start, P_end)
+                error = np.array(closest) - np.array(pos)
+                dist = np.linalg.norm(error)
+
+                if dist > MIN_ERROR:
+                    angles = M_inv @ error
+                    current_az += float(angles[0]) * correction_gain
+                    current_pt += float(angles[1]) * correction_gain
 
         motor.set_speed(current_az, current_pt)
         time.sleep(0.05)
@@ -236,11 +270,15 @@ def track_one_loop(
 ) -> None:
     """开环绕矩形一圈：P0 → P1 → P2 → P3 → P0。"""
     current_pos = corners[0]
-    for target in corners[1:] + [corners[0]]:
-        move = calc_move(current_pos, target, M_inv, speed)
+    for i in range(4):
+        P_start = corners[i]
+        P_end = corners[(i + 1) % 4]
+        move = calc_move(current_pos, P_end, M_inv, speed)
         if move:
-            execute_move_with_correction(motor, cam, move, target, M_inv)
-            current_pos = target
+            execute_move_with_correction(
+                motor, cam, move, P_start, P_end, M_inv,
+            )
+            current_pos = P_end
 
 
 def closed_loop_move(
@@ -256,7 +294,7 @@ def closed_loop_move(
     噪声剔除(>50px)、丢失潮汐(0.25)、到达阈值(10px)。
     返回: True 到达 / False 超时
     """
-    KP = 0.5
+    KP = 0.8
     COAST_FACTOR = 0.25
     ARRIVE_THRESHOLD = 10.0
     NOISE_THRESHOLD = 50.0
