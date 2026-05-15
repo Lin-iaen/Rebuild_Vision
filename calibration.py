@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 # ===== 标定参数 =====
 CALIB_SPEED = 2.0       # 标定角速度 (°/s)
-SETTLE_TIME = 3.0       # 单轴运动时间 (s), dθ = CALIB_SPEED × SETTLE_TIME
+SETTLE_TIME = 5.0       # 单轴运动时间 (s), dθ = CALIB_SPEED × SETTLE_TIME
 SAMPLE_COUNT = 10
 
 # ===== 颜色 (BGR) =====
