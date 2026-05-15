@@ -42,7 +42,7 @@ class LaserParams:
     a_halo_max: int = 145     # 光晕 A 上界
 
     # ---- ROI 掩膜 ----
-    roi_margin: float = 0.1   # 排除画面边缘比例
+    roi_margin: float = 0   # 排除画面边缘比例
 
     # ---- 面积过滤 ----
     area_min_bright: int = 3     # 亮环境面积下限

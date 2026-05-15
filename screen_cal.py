@@ -69,6 +69,7 @@ class ScreenCalibrator:
         keys: KeypadController,
         corners: list,      # 外部可变引用，用于 _frame_provider 实时渲染
         done_flag: list,     # [bool] 可变引用
+        laser_pos: list,     # [tuple|None] 可变引用，实时激光位置
         record_key: str = "enter",
         undo_key: str = "undo",
         cancel_key: str = "q",
@@ -77,6 +78,7 @@ class ScreenCalibrator:
         self._keys = keys
         self._corners = corners
         self._done_flag = done_flag
+        self._laser_pos = laser_pos
         self._record_key = record_key
         self._undo_key = undo_key
         self._cancel_key = cancel_key
@@ -103,32 +105,40 @@ class ScreenCalibrator:
         print("    [q]      取消退出")
         print("-" * 50)
 
+        last_valid_pos = None
+
         while len(raw) < 4:
             pos = _detect_laser(self._cam)
+            if pos is not None:
+                last_valid_pos = pos
+
+            # 实时推送激光位置到 Web 推流（永不消失）
+            self._laser_pos[0] = last_valid_pos
+
+            # 更新全局渲染数据
+            self._corners[:] = raw
 
             # 实时反馈
             status_parts = ["■" if i < len(raw) else "□" for i in range(4)]
             progress = "".join(status_parts)
             target_label = CORNER_LABELS[len(raw)] if len(raw) < 4 else ""
 
-            if pos is not None:
-                pos_str = f"({pos[0]:.0f}, {pos[1]:.0f})"
+            if last_valid_pos is not None:
+                pos_str = f"({last_valid_pos[0]:.0f}, {last_valid_pos[1]:.0f})"
             else:
                 pos_str = "未检测到"
 
             print(f"\r  进度: {progress}  {target_label}  激光: {pos_str}   ", end="", flush=True)
 
-            # 更新全局渲染数据
-            self._corners[:] = raw
-
-            key = self._keys.wait_key()
+            # 非阻塞等待按键，超时后重新检测激光
+            key = self._keys.wait_key(timeout=0.1)
             if key is None:
                 continue
 
             if key == self._record_key:
-                if pos is not None:
-                    raw.append(pos)
-                    print(f"\n  [记录] P{len(raw)-1}: ({pos[0]:.0f}, {pos[1]:.0f})")
+                if last_valid_pos is not None:
+                    raw.append(last_valid_pos)
+                    print(f"\n  [记录] P{len(raw)-1}: ({last_valid_pos[0]:.0f}, {last_valid_pos[1]:.0f})")
                 else:
                     print("\n  [跳过] 未检测到激光，请重试")
 
@@ -140,6 +150,7 @@ class ScreenCalibrator:
             elif key == self._cancel_key:
                 print("\n\n  标定已取消")
                 self._corners.clear()
+                self._laser_pos[0] = None
                 return None
 
         print()
@@ -149,6 +160,7 @@ class ScreenCalibrator:
         sorted_corners = _order_quad_points(raw)
         self._corners[:] = sorted_corners
         self._done_flag[0] = True
+        self._laser_pos[0] = None
 
         print("屏幕标定完成!")
         for i, (x, y) in enumerate(sorted_corners):

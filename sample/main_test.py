@@ -33,7 +33,7 @@ from web_stream import MjpegStream
 # ===== 配置 =====
 CAN_PORT = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5972089810-if00"
 CAN_BAUD = 4000000
-CALIB_SPEED = 6.0       # °/s
+CALIB_SPEED = 2.0       # °/s, 与 calibration.py 一致
 CALIB_FILE = "calibration.json"
 
 # ===== GPIO 按键映射 =====
@@ -59,6 +59,8 @@ _rect_mgr: RectangleManager | None = None
 _calibrator: Calibrator | None = None
 _screen_corners: list[tuple[float, float]] = []   # 屏幕 4 角点 (实时渲染)
 _screen_done: list[bool] = [False]                 # 标定完成标志 (可变引用)
+_screen_laser_pos: list = [None]                    # 实时激光位置 (可变引用)
+_rect_center_display: list = [None]               # 矩形中心显示 (可变引用)
 
 
 def _frame_provider() -> bytes | None:
@@ -96,6 +98,20 @@ def _frame_provider() -> bytes | None:
         if len(_screen_corners) >= 3 and not _screen_done[0]:
             pts = np.array(_screen_corners + [_screen_corners[0]], dtype=np.int32)
             cv2.polylines(annotated, [pts], True, (128, 128, 255), 1)
+
+    # 标定中 → 画实时激光位置 (绿色十字，独立于角点数量)
+    if not _screen_done[0] and _screen_laser_pos[0] is not None:
+        lx, ly = int(_screen_laser_pos[0][0]), int(_screen_laser_pos[0][1])
+        cv2.drawMarker(annotated, (lx, ly), (0, 255, 0), cv2.MARKER_CROSS, 20, 2)
+        cv2.putText(annotated, f"({lx},{ly})", (lx + 15, ly - 15),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1)
+
+    # 品红色斜十字 — 矩形中心（用于验证复位精度）
+    if _rect_center_display[0] is not None:
+        rx, ry = int(_rect_center_display[0][0]), int(_rect_center_display[0][1])
+        cv2.drawMarker(annotated, (rx, ry), (255, 0, 255), cv2.MARKER_TILTED_CROSS, 24, 2)
+        cv2.putText(annotated, "C", (rx + 15, ry - 15),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
 
     ok, buf = cv2.imencode(".jpg", annotated)
     return buf.tobytes() if ok else None
@@ -161,43 +177,110 @@ def detect_laser(cam: Camera) -> tuple[float, float] | None:
 def track_one_loop(
     motor: MotorController,
     corners: list[tuple[float, float]],
-    center: tuple[float, float],
     M_inv: np.ndarray,
     speed: float,
 ) -> None:
-    """开环绕矩形一圈：center → P0→P1→P2→P3 → center。"""
-    current_pos = center
-    for target in corners:
-        move = calc_move(current_pos, target, M_inv, speed)
-        if move:
-            execute_move(motor, move)
-            current_pos = target
-    # 回到中心
-    move = calc_move(current_pos, center, M_inv, speed)
-    if move:
-        execute_move(motor, move)
-
-
-def track_screen_loop(
-    motor: MotorController,
-    corners: list[tuple[float, float]],
-    start_pos: tuple[float, float],
-    M_inv: np.ndarray,
-    speed: float,
-) -> None:
-    """开环绕屏幕一圈：start_pos → P0→P1→P2→P3 → P0。"""
-    move = calc_move(start_pos, corners[0], M_inv, speed)
-    if move:
-        execute_move(motor, move)
+    """开环绕矩形一圈：P0 → P1 → P2 → P3 → P0。"""
     current_pos = corners[0]
-    for target in corners:
+    for target in corners[1:] + [corners[0]]:
         move = calc_move(current_pos, target, M_inv, speed)
         if move:
             execute_move(motor, move)
             current_pos = target
-    move = calc_move(current_pos, corners[0], M_inv, speed)
-    if move:
-        execute_move(motor, move)
+
+
+def closed_loop_move(
+    motor: MotorController,
+    cam: Camera,
+    target: tuple[float, float],
+    M_inv: np.ndarray,
+    timeout: float = 10.0,
+) -> bool:
+    """闭环移动到目标像素坐标。
+
+    实时检测激光 → 像素误差 → M⁻¹ → 角度 → set_speed。
+    噪声剔除(>50px)、丢失潮汐(0.25)、到达阈值(10px)。
+    返回: True 到达 / False 超时
+    """
+    KP = 0.5
+    COAST_FACTOR = 0.25
+    ARRIVE_THRESHOLD = 10.0
+    NOISE_THRESHOLD = 50.0
+
+    last_valid_pos: tuple[float, float] | None = None
+    t_start = time.time()
+
+    while True:
+        if time.time() - t_start > timeout:
+            print(f"\n  [超时] {timeout:.0f}s未到达 ({target[0]:.0f},{target[1]:.0f})")
+            motor.stop()
+            return False
+
+        frame = cam.read()
+        if frame is None:
+            time.sleep(0.05)
+            continue
+
+        pos, _ = process_laser_detection(frame)
+
+        if pos is not None:
+            if last_valid_pos is None:
+                last_valid_pos = pos
+                filtered_pos = pos
+            elif np.linalg.norm(np.array(pos[:2]) - np.array(last_valid_pos[:2])) > NOISE_THRESHOLD:
+                time.sleep(0.05)
+                continue
+            else:
+                last_valid_pos = pos
+                filtered_pos = pos
+
+            error = np.array(target[:2]) - np.array(filtered_pos[:2])
+            dist = np.linalg.norm(error)
+
+            if dist < ARRIVE_THRESHOLD:
+                motor.stop()
+                return True
+
+            angles = M_inv @ error
+            motor.set_speed(float(angles[0]) * KP, float(angles[1]) * KP)
+
+        else:
+            if last_valid_pos is not None:
+                error = np.array(target[:2]) - np.array(last_valid_pos[:2])
+                angles = M_inv @ error
+                motor.set_speed(
+                    float(angles[0]) * KP * COAST_FACTOR,
+                    float(angles[1]) * KP * COAST_FACTOR,
+                )
+            else:
+                motor.stop()
+
+        time.sleep(0.05)
+
+
+def closed_loop_retry(
+    motor: MotorController,
+    cam: Camera,
+    target: tuple[float, float],
+    M_inv: np.ndarray,
+    max_retries: int = 3,
+    settle: float = 0.5,
+) -> bool:
+    """闭环归位，最多重试 max_retries 次。
+
+    每次失败后静置 settle 秒让云台停稳，再重试。
+    返回: True 到达 / False 全部失败
+    """
+    for attempt in range(1, max_retries + 1):
+        if attempt > 1:
+            print(f"    重试 ({attempt}/{max_retries})...")
+            time.sleep(settle)
+            motor.stop()
+            time.sleep(0.2)
+        ok = closed_loop_move(motor, cam, target, M_inv)
+        if ok:
+            return True
+    return False
 
 
 def main():
@@ -242,7 +325,7 @@ def main():
     # ===== [0/4] 屏幕标定 (强制) =====
     print()
     print("[0/4] 屏幕角点标定 (每次启动强制)")
-    sc = ScreenCalibrator(_cam, keys, _screen_corners, _screen_done)
+    sc = ScreenCalibrator(_cam, keys, _screen_corners, _screen_done, _screen_laser_pos)
     screen_corners = sc.run()
     if screen_corners is None:
         motor.stop()
@@ -256,38 +339,45 @@ def main():
     print()
     print("[1/3] 矩形检测")
     print("将黑色胶带矩形放入画面，浏览器确认后按 [enter] (GPIO5)")
-    print("等待按键...")
-    key = keys.wait_key()
-    if key != "enter":
-        _cam.release()
-        uart.close()
-        keys.cleanup()
-        return
 
-    detected = False
-    for _ in range(10):
-        frame = _cam.read()
-        if frame is None:
-            time.sleep(0.1)
-            continue
-        if _rect_mgr.detect(frame):
-            detected = True
-            break
-        time.sleep(0.2)
-
-    if not detected:
-        print("错误：未检测到矩形")
-        _cam.release()
-        uart.close()
-        return
-
-    corners = _rect_mgr.get_ordered_corners()
-    center = _rect_mgr.get_center()
+    corners = None
+    center = None
     labels = ["左上", "右上", "右下", "左下"]
-    print("检测成功！角点:")
-    for i, (x, y) in enumerate(corners):
-        print(f"  P{i}({labels[i]}): ({x:.1f}, {y:.1f})")
-    print(f"  中心: ({center[0]:.1f}, {center[1]:.1f})")
+
+    while True:
+        print("\n等待按键... (按 [enter] 开始检测, 按 [q] 退出)")
+        key = keys.wait_key()
+        if key == "q":
+            _cam.release()
+            uart.close()
+            keys.cleanup()
+            return
+        if key != "enter":
+            continue
+
+        print("检测中...")
+        detected = False
+        for _ in range(10):
+            frame = _cam.read()
+            if frame is None:
+                time.sleep(0.1)
+                continue
+            if _rect_mgr.detect(frame):
+                detected = True
+                break
+            time.sleep(0.2)
+
+        if detected:
+            corners = _rect_mgr.get_ordered_corners()
+            center = _rect_mgr.get_center()
+            print("检测成功！角点:")
+            for i, (x, y) in enumerate(corners):
+                print(f"  P{i}({labels[i]}): ({x:.1f}, {y:.1f})")
+            print(f"  中心: ({center[0]:.1f}, {center[1]:.1f})")
+            _rect_center_display[0] = center
+            break
+
+        print("未检测到矩形，调整矩形位置后重试")
 
     # ===== [2/3] 标定 =====
     print()
@@ -366,17 +456,9 @@ def main():
             print(f"[GPIO] {cmd}")
 
             if cmd == "1":
-                print("复位到屏幕中心...")
-                pos = detect_laser(_cam)
-                if pos is not None:
-                    print(f"  当前位置: ({pos[0]:.1f}, {pos[1]:.1f})")
-                else:
-                    pos = screen_center
-                    print("  未检测到激光，假设位于屏幕中心")
-                move = calc_move(pos, screen_center, M_inv, CALIB_SPEED)
-                if move:
-                    execute_move(motor, move)
-                print("已到达屏幕中心")
+                print("闭环复位到屏幕中心...")
+                ok = closed_loop_retry(motor, _cam, screen_center, M_inv)
+                print("已到达屏幕中心" if ok else "复位未完全到达，可再次尝试")
 
             elif cmd == "2":
                 rcorners = _rect_mgr.get_ordered_corners()
@@ -384,15 +466,50 @@ def main():
                 if not rcorners or rcenter is None:
                     print("无矩形数据")
                     continue
+                # 显示矩形中心（品红斜十字）
+                _rect_center_display[0] = rcenter
+                p0 = rcorners[0]
+
+                # 开环走到 P0
+                pos = detect_laser(_cam)
+                if pos is not None:
+                    print(f"当前位置: ({pos[0]:.0f},{pos[1]:.0f})")
+                    move = calc_move(pos, p0, M_inv, CALIB_SPEED)
+                    if move:
+                        execute_move(motor, move)
+                else:
+                    print("未检测到激光，跳过归位 (可按 [2] 重试)")
+
                 print("绕矩形循迹一圈...")
-                track_one_loop(motor, rcorners, rcenter, M_inv, CALIB_SPEED)
-                print("循迹完成")
+                track_one_loop(motor, rcorners, M_inv, CALIB_SPEED)
+
+                # 循迹结束在 P0，开环回到中心
+                print("循迹完成，开环复位到矩形中心...")
+                move = calc_move(p0, rcenter, M_inv, CALIB_SPEED)
+                if move:
+                    execute_move(motor, move)
+                print("已完成")
 
             elif cmd == "3":
                 pos = detect_laser(_cam)
-                start_pos = pos if pos is not None else screen_center
-                print(f"绕屏幕循迹一圈... (起点: ({start_pos[0]:.0f}, {start_pos[1]:.0f}))")
-                track_screen_loop(motor, screen_corners, start_pos, M_inv, CALIB_SPEED)
+                if pos is None:
+                    print("未检测到激光，无法循迹")
+                    continue
+                print(f"绕屏幕循迹一圈 (闭环)...")
+                print(f"  起点: ({pos[0]:.0f}, {pos[1]:.0f})")
+                sc_labels = ["左上", "右上", "右下", "左下"]
+                all_ok = True
+                # 走到每个角点
+                for i, corner in enumerate(screen_corners):
+                    print(f"  [{i+1}/4] → {sc_labels[i]} ({corner[0]:.0f}, {corner[1]:.0f})")
+                    ok = closed_loop_move(motor, _cam, corner, M_inv)
+                    if not ok:
+                        print(f"  [跳过] 未到达 {sc_labels[i]}")
+                        all_ok = False
+                # 闭合回到起点
+                if all_ok:
+                    print(f"  [闭合] → 起点 ({screen_corners[0][0]:.0f}, {screen_corners[0][1]:.0f})")
+                    closed_loop_move(motor, _cam, screen_corners[0], M_inv)
                 print("循迹完成")
 
             elif cmd == "r":
@@ -415,12 +532,13 @@ def main():
                     for i, (x, y) in enumerate(rcorners):
                         print(f"  P{i}({rlabels[i]}): ({x:.1f}, {y:.1f})")
                     print(f"  中心: ({rcenter[0]:.1f}, {rcenter[1]:.1f})")
+                    _rect_center_display[0] = rcenter
                 else:
                     print("未检测到矩形，保持旧数据")
 
             elif cmd in ("s", "undo"):
                 print("重新屏幕标定...")
-                sc_re = ScreenCalibrator(_cam, keys, _screen_corners, _screen_done)
+                sc_re = ScreenCalibrator(_cam, keys, _screen_corners, _screen_done, _screen_laser_pos)
                 new_sc = sc_re.run()
                 if new_sc is not None:
                     screen_corners = new_sc
