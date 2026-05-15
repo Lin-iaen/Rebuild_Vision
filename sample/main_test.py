@@ -214,8 +214,10 @@ def execute_move_with_correction(
 
     每 check_interval 秒检测激光位置：
     - 检测成功 → 计算到当前边的垂足 → 垂直推回边框
-    - 检测失败 → 激光在黑色边框上 → 无需矫正
+    - 检测失败 → 激光在黑色边框上 → 矫正衰减
     - 距终点 < 15px → 提前退出
+
+    矫正速度持久化，不每帧重置。
     """
     az_speed, pt_speed, duration = move_params
     t_start = time.time()
@@ -223,20 +225,20 @@ def execute_move_with_correction(
     MIN_ERROR = 15.0
     ARRIVE_EARLY = 15.0
 
+    # 持久化的矫正量 (°/s)
+    az_correction = 0.0
+    pt_correction = 0.0
+
     print(
         f"  az={az_speed:+.2f}°/s  pt={pt_speed:+.2f}°/s  t={duration:.2f}s"
         f"  (edge-correct, KP={correction_gain})"
     )
 
     while time.time() - t_start < duration:
-        current_az = az_speed
-        current_pt = pt_speed
-
         if time.time() >= next_check:
             next_check = time.time() + check_interval
             pos = detect_laser_single(cam)
             if pos is not None:
-                # 距终点 < 15px → 提前退出
                 dist_to_end = np.linalg.norm(
                     np.array(P_end) - np.array(pos)
                 )
@@ -244,16 +246,26 @@ def execute_move_with_correction(
                     motor.stop()
                     return
 
-                # 矫正方向 = 边上最近点 - 当前 (垂直推回)
                 closest = project_to_edge(pos, P_start, P_end)
                 error = np.array(closest) - np.array(pos)
                 dist = np.linalg.norm(error)
 
                 if dist > MIN_ERROR:
                     angles = M_inv @ error
-                    current_az += float(angles[0]) * correction_gain
-                    current_pt += float(angles[1]) * correction_gain
+                    # 转为持久化速度矫正 (°/s)
+                    az_correction = float(angles[0]) * correction_gain / check_interval
+                    pt_correction = float(angles[1]) * correction_gain / check_interval
+                else:
+                    az_correction = 0.0
+                    pt_correction = 0.0
+            else:
+                # 检测失败（激光在黑色胶带上）→ 矫正衰减
+                az_correction *= 0.5
+                pt_correction *= 0.5
 
+        # 基础速度 + 持久矫正（不每帧重置）
+        current_az = az_speed + az_correction
+        current_pt = pt_speed + pt_correction
         motor.set_speed(current_az, current_pt)
         time.sleep(0.05)
 
