@@ -25,6 +25,7 @@ from camera import Camera
 from gpio_keys import KeypadController
 from motor import MotorController
 from rectangle import RectangleManager
+from screen_cal import ScreenCalibrator
 from tracker import process_laser_detection
 from uart import UartController
 from web_stream import MjpegStream
@@ -37,19 +38,27 @@ CALIB_FILE = "calibration.json"
 
 # ===== GPIO 按键映射 =====
 PIN_MAP = {
-    5:  "enter",
-    6:  "1",
-    26: "2",
-    16: "3",
-    25: "r",
-    23: "c",
-    24: "q",
+    # Phase 1 屏幕标定
+    5:  "enter",    # 记录当前点
+    27: "undo",     # 撤销上一点
+    24: "q",        # 取消退出
+    # Phase 2/3 复用 enter + 主菜单按键
+    # Phase 4 主菜单
+    6:  "1",        # 复位到屏幕中心
+    26: "2",        # 绕矩形循迹
+    17: "3",        # 绕屏幕循迹
+    25: "r",        # 重新检测矩形
+    23: "c",        # 重新云台标定
+    # GPIO27 在 Phase 4 复用为 "s" (重新屏幕标定), Phase 1 为 "undo"
+    # GPIO16, GPIO22 预留，不接线
 }
 
 # ===== 全局状态 (供 frame_provider) =====
 _cam: Camera | None = None
 _rect_mgr: RectangleManager | None = None
 _calibrator: Calibrator | None = None
+_screen_corners: list[tuple[float, float]] = []   # 屏幕 4 角点 (实时渲染)
+_screen_done: list[bool] = [False]                 # 标定完成标志 (可变引用)
 
 
 def _frame_provider() -> bytes | None:
@@ -71,6 +80,22 @@ def _frame_provider() -> bytes | None:
         annotated = _rect_mgr.annotate(frame)
     else:
         annotated = frame
+
+    # 屏幕角点标注
+    if _screen_corners:
+        # 已完成标定 → 画完整四边形轮廓 (蓝色)
+        if _screen_done[0] and len(_screen_corners) == 4:
+            pts = np.array(_screen_corners + [_screen_corners[0]], dtype=np.int32)
+            cv2.polylines(annotated, [pts], True, (255, 128, 0), 2)
+        # 标定中 → 画已记录的点 (红圈) + 进度线
+        for i, (x, y) in enumerate(_screen_corners):
+            xi, yi = int(x), int(y)
+            cv2.circle(annotated, (xi, yi), 8, (0, 0, 255), -1)
+            cv2.putText(annotated, f"P{i}", (xi + 10, yi - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 1)
+        if len(_screen_corners) >= 3 and not _screen_done[0]:
+            pts = np.array(_screen_corners + [_screen_corners[0]], dtype=np.int32)
+            cv2.polylines(annotated, [pts], True, (128, 128, 255), 1)
 
     ok, buf = cv2.imencode(".jpg", annotated)
     return buf.tobytes() if ok else None
@@ -153,6 +178,28 @@ def track_one_loop(
         execute_move(motor, move)
 
 
+def track_screen_loop(
+    motor: MotorController,
+    corners: list[tuple[float, float]],
+    start_pos: tuple[float, float],
+    M_inv: np.ndarray,
+    speed: float,
+) -> None:
+    """开环绕屏幕一圈：start_pos → P0→P1→P2→P3 → P0。"""
+    move = calc_move(start_pos, corners[0], M_inv, speed)
+    if move:
+        execute_move(motor, move)
+    current_pos = corners[0]
+    for target in corners:
+        move = calc_move(current_pos, target, M_inv, speed)
+        if move:
+            execute_move(motor, move)
+            current_pos = target
+    move = calc_move(current_pos, corners[0], M_inv, speed)
+    if move:
+        execute_move(motor, move)
+
+
 def main():
     global _cam, _rect_mgr, _calibrator
 
@@ -192,11 +239,23 @@ def main():
     keys = KeypadController(PIN_MAP)
     print(f"GPIO 按键: {len(PIN_MAP)} 个, 映射 {PIN_MAP}")
 
+    # ===== [0/4] 屏幕标定 (强制) =====
+    print()
+    print("[0/4] 屏幕角点标定 (每次启动强制)")
+    sc = ScreenCalibrator(_cam, keys, _screen_corners, _screen_done)
+    screen_corners = sc.run()
+    if screen_corners is None:
+        motor.stop()
+        keys.cleanup()
+        _cam.release()
+        uart.close()
+        return
+
     # ===== [1/3] 矩形检测 =====
     _rect_mgr = RectangleManager()
     print()
     print("[1/3] 矩形检测")
-    print("将黑色胶带矩形放入画面，浏览器确认后按 Enter (GPIO5)")
+    print("将黑色胶带矩形放入画面，浏览器确认后按 [enter] (GPIO5)")
     print("等待按键...")
     key = keys.wait_key()
     if key != "enter":
@@ -277,13 +336,21 @@ def main():
     print()
     print("[3/3] 就绪")
     print("=" * 50)
-    print("  [1] 复位到矩形中心 (开环, 自动重检)")
-    print("  [2] 绕矩形循迹一圈 (开环, 跑完自动停)")
-    print("  [3] 停止")
-    print("  [r] 重新检测矩形")
-    print("  [c] 重新标定云台")
+    print("  [1] 复位到屏幕中心    [2] 绕矩形循迹    [3] 绕屏幕循迹")
+    print("  [r] 重新检测矩形      [s] 重新屏幕标定  [c] 重新云台标定")
     print("  [q] 退出")
     print("=" * 50)
+
+    # 主菜单按键提示
+    print("  按键: GPIO6=1  GPIO26=2  GPIO17=3")
+    print("        GPIO25=r  GPIO27=s  GPIO23=c  GPIO24=q")
+
+    # 屏幕中心
+    sc = screen_corners
+    screen_center: tuple[float, float] = (
+        (sc[0][0] + sc[1][0] + sc[2][0] + sc[3][0]) / 4.0,
+        (sc[0][1] + sc[1][1] + sc[2][1] + sc[3][1]) / 4.0,
+    )
 
     try:
         while True:
@@ -291,55 +358,42 @@ def main():
             cmd = keys.wait_key()
             if cmd is None:
                 continue
+
+            # GPIO27 在 Phase 1 是 "undo"，Phase 4 复用为 "s"
+            if cmd == "undo":
+                cmd = "s"
+
             print(f"[GPIO] {cmd}")
 
             if cmd == "1":
-                # 复位：先重检矩形，再检测激光移到新中心
-                print("复位中... (自动重检矩形)")
-                detected = False
-                for _ in range(10):
-                    frame = _cam.read()
-                    if frame is None:
-                        time.sleep(0.1)
-                        continue
-                    if _rect_mgr.detect(frame):
-                        detected = True
-                        break
-                    time.sleep(0.2)
-                if not detected:
-                    print("  错误：未检测到矩形")
-                    continue
-                rcenter = _rect_mgr.get_center()
-                if rcenter is None:
-                    print("  无矩形数据")
-                    continue
-                print(f"  新中心: ({rcenter[0]:.1f}, {rcenter[1]:.1f})")
-
+                print("复位到屏幕中心...")
                 pos = detect_laser(_cam)
                 if pos is not None:
                     print(f"  当前位置: ({pos[0]:.1f}, {pos[1]:.1f})")
                 else:
-                    pos = rcenter
-                    print("  未检测到激光，假设位于中心")
-                move = calc_move(pos, rcenter, M_inv, CALIB_SPEED)
+                    pos = screen_center
+                    print("  未检测到激光，假设位于屏幕中心")
+                move = calc_move(pos, screen_center, M_inv, CALIB_SPEED)
                 if move:
                     execute_move(motor, move)
-                print("已到达中心")
+                print("已到达屏幕中心")
 
             elif cmd == "2":
-                # 循迹一圈，跑完自动停
                 rcorners = _rect_mgr.get_ordered_corners()
                 rcenter = _rect_mgr.get_center()
                 if not rcorners or rcenter is None:
                     print("无矩形数据")
                     continue
-                print("循迹一圈... (跑完自动停)")
+                print("绕矩形循迹一圈...")
                 track_one_loop(motor, rcorners, rcenter, M_inv, CALIB_SPEED)
                 print("循迹完成")
 
             elif cmd == "3":
-                motor.stop()
-                print("已停止")
+                pos = detect_laser(_cam)
+                start_pos = pos if pos is not None else screen_center
+                print(f"绕屏幕循迹一圈... (起点: ({start_pos[0]:.0f}, {start_pos[1]:.0f}))")
+                track_screen_loop(motor, screen_corners, start_pos, M_inv, CALIB_SPEED)
+                print("循迹完成")
 
             elif cmd == "r":
                 print("重新检测矩形...")
@@ -363,6 +417,19 @@ def main():
                     print(f"  中心: ({rcenter[0]:.1f}, {rcenter[1]:.1f})")
                 else:
                     print("未检测到矩形，保持旧数据")
+
+            elif cmd in ("s", "undo"):
+                print("重新屏幕标定...")
+                sc_re = ScreenCalibrator(_cam, keys, _screen_corners, _screen_done)
+                new_sc = sc_re.run()
+                if new_sc is not None:
+                    screen_corners = new_sc
+                    sc = screen_corners
+                    screen_center = (
+                        (sc[0][0] + sc[1][0] + sc[2][0] + sc[3][0]) / 4.0,
+                        (sc[0][1] + sc[1][1] + sc[2][1] + sc[3][1]) / 4.0,
+                    )
+                    print("屏幕标定已更新")
 
             elif cmd == "c":
                 print("重新标定云台...")
