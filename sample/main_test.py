@@ -174,8 +174,62 @@ def detect_laser(cam: Camera) -> tuple[float, float] | None:
     return None
 
 
+def detect_laser_single(cam: Camera) -> tuple[float, float] | None:
+    """单帧检测激光，无重试。用于视觉矫正的快速轮询。"""
+    frame = cam.read()
+    if frame is None:
+        return None
+    pos, _ = process_laser_detection(frame)
+    return pos
+
+
+def execute_move_with_correction(
+    motor: MotorController,
+    cam: Camera,
+    move_params: tuple[float, float, float],
+    target: tuple[float, float],
+    M_inv: np.ndarray,
+    check_interval: float = 0.1,
+    correction_gain: float = 0.2,
+) -> None:
+    """开环移动 + 视觉矫正叠加。
+
+    每 check_interval 秒检测激光位置：
+    - 检测成功 → 激光漂离矩形边框 → 叠加矫正速度推回
+    - 检测失败 → 激光在黑色边框上 → 无需矫正
+    """
+    az_speed, pt_speed, duration = move_params
+    t_start = time.time()
+    next_check = t_start + check_interval
+
+    print(
+        f"  az={az_speed:+.2f}°/s  pt={pt_speed:+.2f}°/s  t={duration:.2f}s"
+        f"  (visual correction ON, KP={correction_gain})"
+    )
+
+    while time.time() - t_start < duration:
+        current_az = az_speed
+        current_pt = pt_speed
+
+        if time.time() >= next_check:
+            next_check = time.time() + check_interval
+            pos = detect_laser_single(cam)
+            if pos is not None:
+                error = np.array(target) - np.array(pos)
+                angles = M_inv @ error
+                current_az += float(angles[0]) * correction_gain
+                current_pt += float(angles[1]) * correction_gain
+
+        motor.set_speed(current_az, current_pt)
+        time.sleep(0.05)
+
+    motor.stop()
+    time.sleep(0.3)
+
+
 def track_one_loop(
     motor: MotorController,
+    cam: Camera,
     corners: list[tuple[float, float]],
     M_inv: np.ndarray,
     speed: float,
@@ -185,7 +239,7 @@ def track_one_loop(
     for target in corners[1:] + [corners[0]]:
         move = calc_move(current_pos, target, M_inv, speed)
         if move:
-            execute_move(motor, move)
+            execute_move_with_correction(motor, cam, move, target, M_inv)
             current_pos = target
 
 
@@ -481,7 +535,7 @@ def main():
                     print("未检测到激光，跳过归位 (可按 [2] 重试)")
 
                 print("绕矩形循迹一圈...")
-                track_one_loop(motor, rcorners, M_inv, CALIB_SPEED)
+                track_one_loop(motor, _cam, rcorners, M_inv, CALIB_SPEED)
 
                 # 循迹结束在 P0，开环回到中心
                 print("循迹完成，开环复位到矩形中心...")
