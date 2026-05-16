@@ -33,7 +33,7 @@ from web_stream import MjpegStream
 # ===== 配置 =====
 CAN_PORT = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5972089810-if00"
 CAN_BAUD = 4000000
-CALIB_SPEED = 4.0       # °/s, 与 calibration.py 一致
+CALIB_SPEED = 6.0       # °/s, 与 calibration.py 一致
 CALIB_FILE = "calibration.json"
 
 # ===== GPIO 按键映射 =====
@@ -252,8 +252,8 @@ def execute_move_with_correction(
                 )
                 if dist_to_end < ARRIVE_EARLY:
                     motor.stop()
-                    time.sleep(0.3)  # 等待云台停稳，避免惯性导致斜穿拐角
-                    return
+                    time.sleep(0.3)
+                    return True
 
                 closest = project_to_edge(pos, P_start, P_end)
                 error = np.array(closest) - np.array(pos)
