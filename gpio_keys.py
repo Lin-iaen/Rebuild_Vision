@@ -33,13 +33,20 @@ class KeypadController:
         bounce_time: 消抖时间(秒), 默认 0.05
     """
 
-    def __init__(self, pin_map: dict[int, str], bounce_time: float = 0.05) -> None:
+    def __init__(
+        self,
+        pin_map: dict[int, str],
+        bounce_time: float = 0.05,
+        hold_time: float = 2.0,
+    ) -> None:
         self._queue: Queue[str] = Queue()
         self._buttons: list[Button] = []
 
         for pin, name in pin_map.items():
             btn = Button(pin, pull_up=True, bounce_time=bounce_time)
             btn.when_pressed = lambda n=name: self._queue.put(n)
+            btn.hold_time = hold_time
+            btn.when_held = lambda n=name: self._queue.put(f"{n}_long")
             self._buttons.append(btn)
 
     def wait_key(self, timeout: float | None = None) -> str | None:
