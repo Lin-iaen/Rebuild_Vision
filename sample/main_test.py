@@ -33,7 +33,7 @@ from web_stream import MjpegStream
 # ===== 配置 =====
 CAN_PORT = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5972089810-if00"
 CAN_BAUD = 4000000
-CALIB_SPEED = 2.0       # °/s, 与 calibration.py 一致
+CALIB_SPEED = 4.0       # °/s, 与 calibration.py 一致
 CALIB_FILE = "calibration.json"
 
 # ===== GPIO 按键映射 =====
@@ -208,7 +208,7 @@ def execute_move_with_correction(
     P_end: tuple[float, float],
     M_inv: np.ndarray,
     check_interval: float = 0.1,
-    correction_gain: float = 0.35,
+    correction_gain: float = 0.2,
 ) -> None:
     """开环移动 + 视觉矫正叠加。
 
