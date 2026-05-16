@@ -477,100 +477,25 @@ def main():
         uart.close()
         return
 
-    # ===== [1/3] 矩形检测 =====
+    # ===== [1/2] 加载标定 + 进入菜单 =====
     _rect_mgr = RectangleManager()
-    print()
-    print("[1/3] 矩形检测")
-    print("将黑色胶带矩形放入画面，浏览器确认后按 [enter] (GPIO5)")
 
-    corners = None
-    center = None
-    labels = ["左上", "右上", "右下", "左下"]
-
-    while True:
-        print("\n等待按键... (按 [enter] 开始检测, 按 [q] 退出)")
-        key = keys.wait_key()
-        if key == "q":
-            _cam.release()
-            uart.close()
-            keys.cleanup()
-            return
-        if key != "enter":
-            continue
-
-        print("检测中...")
-        detected = False
-        for _ in range(10):
-            frame = _cam.read()
-            if frame is None:
-                time.sleep(0.1)
-                continue
-            if _rect_mgr.detect(frame):
-                detected = True
-                break
-            time.sleep(0.2)
-
-        if detected:
-            corners = _rect_mgr.get_ordered_corners()
-            center = _rect_mgr.get_center()
-            print("检测成功！角点:")
-            for i, (x, y) in enumerate(corners):
-                print(f"  P{i}({labels[i]}): ({x:.1f}, {y:.1f})")
-            print(f"  中心: ({center[0]:.1f}, {center[1]:.1f})")
-            _rect_center_display[0] = center
-            break
-
-        print("未检测到矩形，调整矩形位置后重试")
-
-    # ===== [2/3] 标定 =====
-    print()
-    print("[2/3] 云台标定")
     M_inv = load_calibration(CALIB_FILE)
-    if M_inv is not None:
-        print(f"已找到标定文件: {CALIB_FILE}")
-        print("  [1] 跳过标定，使用已有数据")
-        print("  [2] 重新标定")
+    if M_inv is None:
+        M_inv = np.eye(2)
+        print("未找到标定文件，使用默认单位矩阵")
     else:
-        print("未找到标定文件")
-        print("  [1] 跳过标定，使用默认值（单位矩阵）")
-        print("  [2] 运行标定流程")
-
-    print("  等待按键... (GPIO6=跳过, GPIO26=标定)")
-    choice = keys.wait_key() or "1"
-
-    if choice == "2":
-        # 标定前确保电机静止
-        motor.stop()
-        # 启动标定器 (Web 推流会自动显示轨迹)
-        _calibrator = Calibrator(_cam, motor)
-        print("\n标定中... 浏览器可查看实时轨迹")
-        print("云台将先归零，然后分别沿 az/pt 轴匀速运动\n")
-
-        M_inv = _calibrator.run()
-        _calibrator = None  # 退出标定模式
-
-        if M_inv is not None:
-            save_calibration(M_inv, CALIB_FILE)
-            motor.stop()
-            print("标定完成，结果已保存")
-        else:
-            print("标定失败，使用默认值")
-            M_inv = np.eye(2)
-    else:
-        if M_inv is None:
-            print("使用默认单位矩阵")
-            M_inv = np.eye(2)
-
+        print(f"已加载标定文件: {CALIB_FILE}")
     print("标定矩阵 M⁻¹:")
     print(f"  [{M_inv[0,0]:8.4f}  {M_inv[0,1]:8.4f}]")
     print(f"  [{M_inv[1,0]:8.4f}  {M_inv[1,1]:8.4f}]")
 
-    # ===== [3/3] 就绪 =====
+    # ===== 主菜单 =====
     print()
-    print("[3/3] 就绪")
+    print("[1/2] 就绪")
     print("=" * 50)
     print("  [1] 复位到屏幕中心    [2] 绕矩形循迹    [3] 绕屏幕循迹")
-    print("  [r] 重新检测矩形      [s] 重新屏幕标定  [c] 重新云台标定")
+    print("  [r] 检测矩形          [s] 重新屏幕标定  [c] 重新云台标定")
     print("  [q] 短按=云台复位    [q] 长按2s=退出程序")
     print("=" * 50)
 
