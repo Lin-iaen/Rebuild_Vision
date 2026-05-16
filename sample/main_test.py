@@ -161,6 +161,20 @@ def execute_move(
     time.sleep(0.3)
 
 
+def line_intersection(
+    a: tuple[float, float], b: tuple[float, float],
+    c: tuple[float, float], d: tuple[float, float],
+) -> tuple[float, float]:
+    """计算线段 a↔b 与 c↔d 的交点。"""
+    x1, y1 = a; x2, y2 = b; x3, y3 = c; x4, y4 = d
+    denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+    if abs(denom) < 1e-9:
+        return ((x1 + x3) / 2, (y1 + y3) / 2)
+    px = ((x1 * y2 - y1 * x2) * (x3 - x4) - (x1 - x2) * (x3 * y4 - y3 * x4)) / denom
+    py = ((x1 * y2 - y1 * x2) * (y3 - y4) - (y1 - y2) * (x3 * y4 - y3 * x4)) / denom
+    return (px, py)
+
+
 def detect_laser(cam: Camera) -> tuple[float, float] | None:
     """检测激光当前位置。"""
     for _ in range(5):
@@ -564,11 +578,11 @@ def main():
     print("  按键: GPIO6=1  GPIO26=2  GPIO17=3")
     print("        GPIO25=r  GPIO27=s  GPIO23=c  GPIO24=q")
 
-    # 屏幕中心
+    # 屏幕中心（对角线交点，透视校正）
     sc = screen_corners
-    screen_center: tuple[float, float] = (
-        (sc[0][0] + sc[1][0] + sc[2][0] + sc[3][0]) / 4.0,
-        (sc[0][1] + sc[1][1] + sc[2][1] + sc[3][1]) / 4.0,
+    screen_center: tuple[float, float] = line_intersection(
+        sc[0], sc[2],   # P0(左上) ↔ P2(右下)
+        sc[1], sc[3],   # P1(右上) ↔ P3(左下)
     )
 
     try:
@@ -679,9 +693,8 @@ def main():
                 if new_sc is not None:
                     screen_corners = new_sc
                     sc = screen_corners
-                    screen_center = (
-                        (sc[0][0] + sc[1][0] + sc[2][0] + sc[3][0]) / 4.0,
-                        (sc[0][1] + sc[1][1] + sc[2][1] + sc[3][1]) / 4.0,
+                    screen_center = line_intersection(
+                        sc[0], sc[2], sc[1], sc[3],
                     )
                     print("屏幕标定已更新")
 

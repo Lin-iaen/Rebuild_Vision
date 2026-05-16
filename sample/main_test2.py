@@ -131,6 +131,19 @@ def detect_laser(cam: Camera) -> tuple[float, float] | None:
     return None
 
 
+def line_intersection(
+    a: tuple[float, float], b: tuple[float, float],
+    c: tuple[float, float], d: tuple[float, float],
+) -> tuple[float, float]:
+    x1, y1 = a; x2, y2 = b; x3, y3 = c; x4, y4 = d
+    denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+    if abs(denom) < 1e-9:
+        return ((x1 + x3) / 2, (y1 + y3) / 2)
+    px = ((x1 * y2 - y1 * x2) * (x3 - x4) - (x1 - x2) * (x3 * y4 - y3 * x4)) / denom
+    py = ((x1 * y2 - y1 * x2) * (y3 - y4) - (y1 - y2) * (x3 * y4 - y3 * x4)) / denom
+    return (px, py)
+
+
 def track_one_loop(
     motor: MotorController,
     corners: list[tuple[float, float]],
@@ -385,9 +398,8 @@ def main():
 
     # 屏幕中心
     sc = screen_corners
-    screen_center: tuple[float, float] = (
-        (sc[0][0] + sc[1][0] + sc[2][0] + sc[3][0]) / 4.0,
-        (sc[0][1] + sc[1][1] + sc[2][1] + sc[3][1]) / 4.0,
+    screen_center: tuple[float, float] = line_intersection(
+        sc[0], sc[2], sc[1], sc[3],
     )
 
     try:
