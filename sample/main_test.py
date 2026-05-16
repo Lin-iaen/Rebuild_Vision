@@ -208,7 +208,7 @@ def execute_move_with_correction(
     P_end: tuple[float, float],
     M_inv: np.ndarray,
     check_interval: float = 0.1,
-    correction_gain: float = 0.5,
+    correction_gain: float = 0.35,
 ) -> None:
     """开环移动 + 视觉矫正叠加。
 
@@ -222,7 +222,7 @@ def execute_move_with_correction(
     az_speed, pt_speed, duration = move_params
     t_start = time.time()
     next_check = t_start + check_interval
-    MIN_ERROR = 8.0
+    MIN_ERROR = 5.0
     ARRIVE_EARLY = 15.0
 
     # 持久化的矫正量 (°/s)
@@ -244,6 +244,7 @@ def execute_move_with_correction(
                 )
                 if dist_to_end < ARRIVE_EARLY:
                     motor.stop()
+                    time.sleep(0.3)  # 等待云台停稳，避免惯性导致斜穿拐角
                     return
 
                 closest = project_to_edge(pos, P_start, P_end)
